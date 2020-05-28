@@ -12,6 +12,7 @@ let paths = pagedjsLocation.split("node_modules");
 let scriptPath = paths[0] + "node_modules" + paths[paths.length-1];
 
 const PostProcesser = require("./postprocesser");
+const EpubProcesser = require("./epub");
 
 class Printer extends EventEmitter {
   constructor(options = {}) {
@@ -26,7 +27,10 @@ class Printer extends EventEmitter {
     this.ignoreHTTPSErrors = options.ignoreHTTPSErrors;
     this.browserWSEndpoint = options.browserEndpoint;
 
+    this.size = {};
+    this.pixelSize = {};
     this.pages = [];
+    this.capturedResponses = [];
   }
 
   async setup() {
@@ -51,7 +55,7 @@ class Printer extends EventEmitter {
     return browser;
   }
 
-  async render(input) {
+  async render(input, capture) {
     let resolver;
     let rendered = new Promise(function(resolve, reject) {
       resolver = resolve;
@@ -107,6 +111,22 @@ class Printer extends EventEmitter {
       request.continue();
     });
 
+    if (capture) {
+      page.on('response', async response => {
+        if (response.request()) {
+          let buffer = await response.buffer();
+          let url = response.url();
+          let filename = path.basename(url);
+          this.capturedResponses.push({
+            url,
+            filename,
+            buffer
+          });
+        }
+      });
+    }
+
+
     if (html) {
       await page.setContent(html)
         .catch((e) => {
@@ -136,7 +156,13 @@ class Printer extends EventEmitter {
       window.PagedConfig.auto = false;
     });
 
-
+    await page.evaluate(() => {
+      // Remove scripts
+      let scripts = document.querySelectorAll("script");
+      Array.from(scripts).forEach((el) => {
+        el.remove();
+      });
+    });
 
     await page.addScriptTag({
       path: scriptPath
@@ -152,8 +178,10 @@ class Printer extends EventEmitter {
     //   console.log(msg);
     // });
 
-    await page.exposeFunction("onSize", (size) => {
-      this.emit("size", size);
+    await page.exposeFunction("onSize", (size, pixelSize) => {
+      this.size = size;
+      this.pixelSize = pixelSize;
+      this.emit("size", size, pixelSize);
     });
 
     await page.exposeFunction("onPage", (page) => {
@@ -166,7 +194,7 @@ class Printer extends EventEmitter {
 
     await page.exposeFunction("onRendered", (msg, width, height, orientation) => {
       this.emit("rendered", msg, width, height, orientation);
-      resolver({msg, width, height, orientation});
+      resolver({ msg, width, height, orientation });
     });
 
     await page.evaluate(() => {
@@ -199,7 +227,11 @@ class Printer extends EventEmitter {
       });
 
       window.PagedPolyfill.on("size", (size) => {
-        window.onSize(size);
+        let pixelSize = {
+          width: new CSSUnitValue(size.width.value, size.width.unit).to("px").value,
+          height: new CSSUnitValue(size.height.value, size.height.unit).to("px").value
+        };
+        window.onSize(size, pixelSize);
       });
 
       window.PagedPolyfill.on("rendered", (flow) => {
@@ -321,8 +353,46 @@ class Printer extends EventEmitter {
     return pdf;
   }
 
+  async prepareHtml(page) {
+    let stylesheets = await page.evaluate(() => {
+      // Get combined css rule text
+      let combined = "";
+      Array.from(document.styleSheets).forEach((sheet) => {
+        Array.from(sheet.cssRules).forEach((rule) => {
+          combined += `${rule.cssText}\n`;
+        });
+      });
+
+      // Remove original
+      let styles = document.querySelectorAll("style");
+      Array.from(styles).forEach((el) => {
+        el.remove();
+      });
+
+      // Add new combined sheet
+      let head = document.querySelector("head");
+      let combinedStyles = document.createElement("style");
+      let cssText = document.createTextNode(combined);
+      combinedStyles.type = "text/css";
+      combinedStyles.appendChild(cssText);
+      head.appendChild(combinedStyles);
+
+      return combined;
+    });
+
+    await page.evaluate(() => {
+      // Remove scripts
+      let scripts = document.querySelectorAll("script");
+      Array.from(scripts).forEach((el) => {
+        el.remove();
+      });
+    });
+  }
+  
   async html(input, stayopen) {
     let page = await this.render(input);
+
+    await this.prepareHtml(page);
 
     let content = await page.content()
       .catch((e) => {
@@ -331,6 +401,23 @@ class Printer extends EventEmitter {
 
     await page.close();
     return content;
+  }
+
+  async epub(input) {
+    let page = await this.render(input, true);
+
+    await this.prepareHtml(page);
+
+    let content = await page.content()
+      .catch((e) => {
+        console.error(e);
+      });
+
+    await page.close();
+
+    let epub = new EpubProcesser(content, this.capturedResponses, this.pixelSize);
+
+    return epub;
   }
 
   async preview(input) {

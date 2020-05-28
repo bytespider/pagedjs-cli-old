@@ -25,6 +25,7 @@ program
   // .option("-e, --encoding [type]", "Set the encoding of the input html, defaults to "utf-8"")
   .option("-t, --timeout [ms]", "Set a max timeout of [ms]")
   .option("-x, --html", "output html file")
+  .option("-e, --epub", "output epub file")
   .option("-b, --blockLocal", "Disallow access to filesystem for local files")
   .option("-r, --blockRemote", "Disallow requests to remote servers")
   .option("--allowedPath [allowedPaths]", "Only allow access to given filesystem paths, repeatable.", collect, [])
@@ -142,6 +143,9 @@ if (typeof input === "string") {
     if (program.html) {
       file = await printer.html(input, options);
       output = replaceExt(output, ".html");
+    } else if (program.epub) {
+      file = await printer.epub(input, options);
+      output = replaceExt(output, ".epub");
     } else {
       options.outlineTags = !program.outlineTags ? [] : program.outlineTags.split(",");
       file = await printer.pdf(input, options);
